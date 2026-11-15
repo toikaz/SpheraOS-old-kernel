@@ -1,2 +1,24 @@
 # autoexec.plb - runs automatically at every boot
-print "Welcome back! Type 'help' to get started."
+login:
+print "Enter name: "
+input a$
+print "Enter password: "
+input b$
+if a$ == "root" and b$ == "root" then goto ok
+if a$ != "root"
+    print "Wrong name or password!"
+    goto login
+end
+if b$ != "root" then print "Wrong password!"
+goto login
+
+ok:
+run setcolor.bin
+run setcolor.bin
+run setcolor.bin
+run setcolor.bin
+run setcolor.bin
+run setcolor.bin
+run setcolor.bin
+run setcolor.bin
+sysfetch
