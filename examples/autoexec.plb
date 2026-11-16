@@ -13,5 +13,5 @@ if b$ != "root" then print "Wrong password!"
 goto login
 
 ok:
-sysfetch
 ls
+ver
