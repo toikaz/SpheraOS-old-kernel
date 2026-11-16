@@ -1330,6 +1330,7 @@ cmd_ls:
     mov [ls_files], ax
     mov [ls_bytes], ax
     mov [ls_bytes+2], ax
+    mov byte [ls_col], 0    ; Сброс счетчика колонок
     mov bx, dirbuf
     mov cx, [rootent]
 .l:
@@ -1340,26 +1341,40 @@ cmd_ls:
     je .next
     test byte [bx+11], 0x08
     jnz .next
+    
+    ; Печатаем имя (PrintName83 сам добивает пробелами до 14 символов)
     mov si, bx
     call PrintName83
+    
+    ; Проверяем, папка это или файл
     test byte [bx+11], 0x10
     jz .file
-    mov si, msg_dirtag
-    call Print
-    call PrintNL
-    jmp .next
+    
+    ; Если это папка, просто идем дальше (чтобы не сбить колонки)
+    jmp .count_col
 .file:
+    ; Считаем статистику для файлов
+    inc word [ls_files]
     mov ax, [bx+28]
     mov dx, [bx+30]
-    call PrintDec32
-    call PrintNL
-    inc word [ls_files]
     add [ls_bytes], ax
     adc [ls_bytes+2], dx
+.count_col:
+    inc byte [ls_col]
+    cmp byte [ls_col], 5    ; 5 колонок по 14 символов = 70 (влезает в 80)
+    jb .next
+    call PrintNL            ; Переход на новую строку
+    mov byte [ls_col], 0    ; Сброс счетчика
 .next:
     add bx, 32
     loop .l
 .done:
+    ; Если в последней строке остались элементы, делаем перенос
+    cmp byte [ls_col], 0
+    je .summary
+    call PrintNL
+.summary:
+    ; Вывод итоговой статистики (как было)
     mov ax, [ls_files]
     call PrintDec
     mov si, msg_files
@@ -5344,6 +5359,7 @@ sf_ptr      resw 1
 sf_left     resw 1
 ls_files    resw 1
 ls_bytes    resw 2
+ls_col      resb 1
 fk_files    resw 1
 fk_err      resw 1
 fk_lost     resw 1
