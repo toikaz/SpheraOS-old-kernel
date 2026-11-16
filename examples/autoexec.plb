@@ -13,5 +13,6 @@ if b$ != "root" then print "Wrong password!"
 goto login
 
 ok:
+clear
 ls
 ver
