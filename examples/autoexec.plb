@@ -13,13 +13,5 @@ if b$ != "root" then print "Wrong password!"
 goto login
 
 ok:
-run setcolor.bin
-run setcolor.bin
-run setcolor.bin
-run setcolor.bin
-run setcolor.bin
-run setcolor.bin
-run setcolor.bin
-run setcolor.bin
 sysfetch
 ls
