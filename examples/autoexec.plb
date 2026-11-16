@@ -14,5 +14,8 @@ goto login
 
 ok:
 clear
-ls
 ver
+sysfetch
+ls
+echo
+print "Welcome, ", a$, "!"
