@@ -2,12 +2,14 @@
 # SpheraOS build script
 #   1. Assembles boot.asm, kernel.asm, and all *.asm from the root into asm/
 #   2. Also assembles any *.asm found inside asm/ (if present)
-#   3. Creates floppy.img (FAT12 1.44MB), writes boot sector from asm/boot.bin
-#   4. Copies files into the image:
+#   3. Assembles all *.asm from gui/ into .app files
+#   4. Creates floppy.img (FAT12 1.44MB), writes boot sector from asm/boot.bin
+#   5. Copies files into the image:
 #         asm/kernel.bin       -> KERNEL.BIN
 #         asm/<name>.bin       -> <NAME>.BIN   (except boot.bin)
+#         asm/<name>.app       -> <NAME>.APP   (GUI programs)
 #         examples/*           -> <UPPERCASE>
-#   5. Launches QEMU
+#   6. Launches QEMU
 set -e
 
 # Always work from the directory containing this script
@@ -15,6 +17,7 @@ cd "$(dirname "$0")"
 
 ASM_DIR=asm
 EXAMPLES_DIR=examples
+GUI_DIR=gui
 IMG=floppy.img
 
 mkdir -p "$ASM_DIR"
@@ -43,6 +46,17 @@ for src in "$ASM_DIR"/*.asm; do
     nasm -f bin "$src" -o "$ASM_DIR/$base.bin"
 done
 
+# ---- NEW: Build GUI programs from gui/ directory ----
+if [ -d "$GUI_DIR" ]; then
+    for src in "$GUI_DIR"/*.asm; do
+        [ -f "$src" ] || continue
+        base=$(basename "$src" .asm)
+        echo "[*] $src -> $ASM_DIR/$base.app"
+        # -I flags help nasm find sdk.inc if it's in the root or in gui/
+        nasm -f bin -I "$GUI_DIR/" -I . "$src" -o "$ASM_DIR/$base.app"
+    done
+fi
+
 # ---- 2. Create image ----
 echo "[*] Creating $IMG (FAT12, 1.44MB, label: SpheraOS)"
 dd if=/dev/zero of="$IMG" bs=512 count=2880 2>/dev/null
@@ -60,6 +74,15 @@ if command -v mcopy >/dev/null 2>&1; then
         [ -f "$f" ] || continue
         base=$(basename "$f")
         case "$base" in boot.bin|kernel.bin) continue ;; esac
+        name=$(echo "$base" | tr 'a-z' 'A-Z')
+        mcopy -o -i "$IMG" "$f" "::$name"
+        echo "[+] $name"
+    done
+
+    # ---- NEW: Copy GUI .app files ----
+    for f in "$ASM_DIR"/*.app; do
+        [ -f "$f" ] || continue
+        base=$(basename "$f")
         name=$(echo "$base" | tr 'a-z' 'A-Z')
         mcopy -o -i "$IMG" "$f" "::$name"
         echo "[+] $name"
@@ -90,6 +113,15 @@ else
         [ -f "$f" ] || continue
         base=$(basename "$f")
         case "$base" in boot.bin|kernel.bin) continue ;; esac
+        name=$(echo "$base" | tr 'a-z' 'A-Z')
+        sudo cp "$f" "mnt/$name"
+        echo "[+] $name"
+    done
+
+    # ---- NEW: Copy GUI .app files (fallback) ----
+    for f in "$ASM_DIR"/*.app; do
+        [ -f "$f" ] || continue
+        base=$(basename "$f")
         name=$(echo "$base" | tr 'a-z' 'A-Z')
         sudo cp "$f" "mnt/$name"
         echo "[+] $name"
