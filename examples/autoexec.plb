@@ -22,3 +22,4 @@ run setcolor.bin
 run setcolor.bin
 run setcolor.bin
 sysfetch
+ls
