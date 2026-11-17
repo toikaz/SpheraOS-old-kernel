@@ -86,8 +86,21 @@ start:
     mov [seed], dx
     mov ax, 0x0003
     int 0x10
+
+    ; ---- Boot log в стиле Linux (про SpheraOS) ----
+    mov bx, boot_log_table
+.bl:
+    mov si, [bx]
+    test si, si
+    jz .bl_done
+    call PrintSlow
+    add bx, 2
+    jmp .bl
+.bl_done:
+
     mov si, msg_banner
     call Print
+
     call MountDrive
     jnc .mok
     mov si, msg_nomount
@@ -138,6 +151,28 @@ Print:                          ; DS:SI asciiz
     jmp .l
 .d:
     pop si
+    pop ax
+    ret
+
+; PrintSlow: печатает строку с небольшой задержкой, чтобы boot выглядел как загрузка
+PrintSlow:
+    push ax
+    push cx
+    push dx
+    push si
+    call Print
+    mov cx, 36
+.delay:
+    in al, 0x40             ; ждём смены младшего байта счётчика PIT
+    mov ah, al
+.wait:
+    in al, 0x40
+    cmp al, ah
+    je .wait
+    loop .delay
+    pop si
+    pop dx
+    pop cx
     pop ax
     ret
 
@@ -483,6 +518,37 @@ DiskIO:
     push cx
     push dx
     push si
+    add ax, [part_base]             ; смещение раздела MBR
+    mov [io_lba], ax
+
+    ; --- Сначала LBA (int 13h AH=42/43) — надёжно для флешек и больших дисков ---
+    mov byte [dap], 0x10
+    mov byte [dap+1], 0
+    mov word [dap_lba], ax
+    mov word [dap_lba+2], 0
+    mov word [dap_lba+4], 0
+    mov word [dap_lba+6], 0
+    mov word [dap_off], bx
+    mov word [dap_cnt], 1
+    mov word [dap_seg], es          ; буфер может быть в сегменте ЗАДАЧИ, не в KSEG!
+    mov si, dap
+    mov dl, [bdrive]
+    mov ah, [dop]
+    cmp ah, 2
+    je .lbra
+    mov ah, 0x43
+    jmp .lbgo
+.lbra:
+    mov ah, 0x42
+.lbgo:
+    push ds                         ; BIOS int 13h может портить DS/ES
+    push es
+    int 0x13
+    pop es
+    pop ds
+    jnc .ok
+    ; --- Fallback: старый CHS-путь ---
+    mov ax, [io_lba]
     mov si, 5
 .try:
     push ax
@@ -499,12 +565,20 @@ DiskIO:
     mov dl, [bdrive]
     mov ah, [dop]
     mov al, 1
+    push ds                         ; снова сохраняем сегменты
+    push es
     int 0x13
+    pop es
+    pop ds
     pop ax
     jnc .ok
     push ax
     xor ax, ax
+    push ds
+    push es
     int 0x13
+    pop es
+    pop ds
     pop ax
     dec si
     jnz .try
@@ -546,12 +620,35 @@ MountDrive:
     push dx
     mov byte [dir_ok], 0
     mov byte [fat_ok], 0
+    mov word [part_base], 0
     xor ax, ax
     mov bx, secbuf
     call RdK
     jc near .fail
     cmp word [secbuf+510], 0xAA55
     jne near .fail
+    ; MBR: попробовать первый раздел типа FAT12 (0x01)
+    cmp byte [secbuf+0x1BE+4], 0x01
+    jne .no_part
+    mov ax, [secbuf+0x1BE+8]
+    test ax, ax
+    jz .no_part
+    mov [part_base], ax
+    xor ax, ax
+    mov bx, secbuf
+    call RdK
+    jc .bad_part
+    cmp word [secbuf+510], 0xAA55
+    jne .bad_part
+    cmp word [secbuf+11], 512
+    je .no_part
+.bad_part:
+    mov word [part_base], 0
+    xor ax, ax
+    mov bx, secbuf
+    call RdK
+    jc near .fail
+.no_part:
     cmp word [secbuf+11], 512
     jne near .fail
     xor ah, ah
@@ -1728,9 +1825,76 @@ cmd_disk:
     call PrintNL
     ret
 
+cmd_drives:
+    mov si, msg_drives
+    call Print
+    mov byte [scan_drv], 0
+.scan:
+    mov dl, [scan_drv]
+    push ds
+    pop es
+    mov bx, secbuf
+    mov ah, 0x08
+    int 0x13
+    jc .next
+    mov [scan_cx], cx
+    mov [scan_dx], dx
+    mov si, msg_drvnum
+    call Print
+    mov al, [scan_drv]
+    call PrintHexB
+    cmp byte [scan_drv], 0x80
+    jb .floppy
+    mov si, msg_hdd
+    jmp .type
+.floppy:
+    mov si, msg_floppy
+.type:
+    call Print
+    mov si, msg_d_spt
+    call Print
+    mov ax, [scan_cx]
+    and ax, 0x003F
+    call PrintLn
+    mov si, msg_d_heads
+    call Print
+    mov ax, [scan_dx]
+    mov al, ah
+    xor ah, ah
+    inc ax
+    call PrintLn
+.next:
+    inc byte [scan_drv]
+    jnz .scan
+    ret
+
 cmd_drive:
     cmp byte [si], 0
     je .show
+    ; числовой BIOS-привод: "drive 81" (hex) или "drive 129" (dec via 'd')
+    mov al, [si]
+    cmp al, '0'
+    jb .letter
+    cmp al, '9'
+    ja .letter
+    call ParseNumber                ; "0x81" -> 0x81
+    mov [new_drv], al
+    mov al, [bdrive]
+    mov [old_drv], al
+    mov al, [new_drv]
+    mov [bdrive], al
+    call MountDrive
+    jc .badnum
+    call LoadRoot
+    ret
+.badnum:
+    mov al, [old_drv]
+    mov [bdrive], al
+    call MountDrive
+    mov si, msg_mountfail
+    call Print
+    ret
+.letter:
     mov al, [si]
     or al, 0x20
     mov bl, 0
@@ -1759,6 +1923,7 @@ cmd_drive:
     ret
 .ok:
     pop ax
+    call LoadRoot
 .show:
     mov si, msg_curdrive
     call Print
@@ -1770,6 +1935,21 @@ cmd_drive:
     ret
 
 cmd_format:
+    ; ищем цифру в аргументе ("0x81") — полное форматирование привода
+    mov di, si
+    mov cx, 12
+.scan:
+    mov al, [di]
+    cmp al, '0'
+    jb .nx
+    cmp al, '9'
+    ja .nx
+    mov si, di
+    jmp cmd_fmt_full
+.nx:
+    inc di
+    loop .scan
+.quick:
     mov byte [fmt_all], 0
     cmp byte [si], '-'
     jne .ask
@@ -1815,6 +1995,121 @@ cmd_format:
     call SaveRoot
     jc near disk_err
     mov si, msg_fmt_done
+    call Print
+    ret
+.no:
+    mov si, msg_cancel
+    call Print
+    ret
+
+; Полное форматирование выбранного BIOS-привода в FAT12 (1.44 МБ)
+cmd_fmt_full:
+    cmp byte [si], 0
+    je .usage
+    mov al, [si]
+    cmp al, '0'
+    jb .usage
+    cmp al, '9'
+    ja .usage
+    call ParseNumber                ; "0x81" -> 0x81
+    mov [fmt_drv], al
+    mov si, msg_fmt_full_ask
+    call Print
+    call ReadLine
+    jc .no
+    mov al, [inbuf]
+    or al, 0x20
+    cmp al, 'y'
+    jne .no
+
+    mov al, [bdrive]
+    mov [fmt_old], al
+    mov al, [fmt_drv]
+    mov [bdrive], al
+    mov word [part_base], 0
+
+    ; --- загрузочный сектор и BPB ---
+    mov di, secbuf
+    mov cx, 512
+    xor al, al
+    rep stosb
+    mov byte [secbuf], 0xEB
+    mov byte [secbuf+1], 0x3C
+    mov byte [secbuf+2], 0x90
+    mov si, oemname
+    mov di, secbuf+3
+    mov cx, 8
+    rep movsb
+    mov word [secbuf+11], 512       ; байт/сектор
+    mov byte [secbuf+13], 1         ; секторов/кластер
+    mov word [secbuf+14], 1         ; зарезервировано
+    mov byte [secbuf+16], 2         ; число FAT
+    mov word [secbuf+17], 224       ; записей в root
+    mov word [secbuf+19], 2880      ; всего секторов
+    mov byte [secbuf+21], 0xF0      ; media descriptor
+    mov word [secbuf+22], 9         ; секторов на FAT
+    mov word [secbuf+24], 18        ; spt
+    mov word [secbuf+26], 2         ; heads
+    mov word [secbuf+28], 0         ; hidden sectors
+    mov word [secbuf+30], 0
+    mov word [secbuf+510], 0xAA55
+
+    mov ax, 0
+    mov bx, secbuf
+    call WrK
+    jc .err
+
+    ; --- две копии FAT (по 9 секторов нулей) ---
+    mov di, fatbuf
+    mov cx, 6144
+    xor al, al
+    rep stosb
+    mov ax, 1
+    mov cx, 9
+    mov bx, fatbuf
+.wfat1:
+    call WrK
+    jc .err
+    inc ax
+    loop .wfat1
+    mov ax, 10
+    mov cx, 9
+    mov bx, fatbuf
+.wfat2:
+    call WrK
+    jc .err
+    inc ax
+    loop .wfat2
+
+    ; --- корневой каталог: 14 секторов нулей ---
+    mov di, dirbuf
+    mov cx, 7168
+    xor al, al
+    rep stosb
+    mov ax, 19
+    mov cx, 14
+    mov bx, dirbuf
+.wroot:
+    call WrK
+    jc .err
+    inc ax
+    loop .wroot
+
+    mov si, msg_fmt_done
+    call Print
+    jmp .restore
+
+.err:
+    mov si, msg_diskerr
+    call Print
+.restore:
+    mov al, [fmt_old]
+    mov [bdrive], al
+    call MountDrive
+    call LoadRoot
+    ret
+.usage:
+    mov si, msg_use_fmt
     call Print
     ret
 .no:
@@ -2334,8 +2629,8 @@ WaitTask:                       ; AL = slot, wait until it finishes (Ctrl+C kill
 .nokey:
     cmp byte [wt_ran], 0
     jne .l
-    sti
-    hlt
+    ; Раньше здесь было sti/hlt: на железе, где BIOS не размаскировал
+    ; IRQ0 таймера, WaitTask висел навсегда. Крутимся без hlt.
     jmp .l
 .done:
     pop si
@@ -5102,6 +5397,7 @@ cmd_table:
     dw n_df, cmd_df
     dw n_disk, cmd_disk
     dw n_drive, cmd_drive
+    dw n_drives, cmd_drives
     dw n_format, cmd_format
     dw n_fsck, cmd_fsck
     dw n_sec, cmd_sec
@@ -5143,6 +5439,8 @@ n_fg        db "fg", 0
 n_df        db "df", 0
 n_disk      db "disk", 0
 n_drive     db "drive", 0
+n_drives    db "drives", 0
+n_fmt       db "fmt", 0
 n_format    db "format", 0
 n_fsck      db "fsck", 0
 n_sec       db "sec", 0
@@ -5163,6 +5461,45 @@ n_shutdown  db "shutdown", 0
 ; ------------------------------------------------------------
 ; Messages
 ; ------------------------------------------------------------
+bl_00 db "SpheraOS boot log:", 10, 0
+bl_01 db "[    0.000000] SpheraOS 3.0 - Plumbum kernel starting...", 10, 0
+bl_02 db "[    0.000014] BIOS: x86 16-bit real-mode machine", 10, 0
+bl_03 db "[    0.000037] CPU: 8086-compatible instruction set", 10, 0
+bl_04 db "[    0.000061] A20 address gate: enabled", 10, 0
+bl_05 db "[    0.000088] BIOS memory: 640K conventional RAM", 10, 0
+bl_06 db "[    0.000112] BIOS disk services: int 13h available", 10, 0
+bl_07 db "[    0.000139] Scanning BIOS drives 0x00-0xFF...", 10, 0
+bl_08 db "[    0.000163] Boot sector signature 0xAA55: OK", 10, 0
+bl_09 db "[    0.000190] FAT12 BPB: 512 B/sector, 1 sector/cluster", 10, 0
+bl_10 db "[    0.000214] FAT12: 2 FAT copies, 224 root entries", 10, 0
+bl_11 db "[    0.000238] FAT12: root directory -> DIRBUF 7 KB", 10, 0
+bl_12 db "[    0.000262] FAT12: FAT table -> FATBUF 6 KB", 10, 0
+bl_13 db "[    0.000285] Disk layer: LBA read/write, CHS fallback", 10, 0
+bl_14 db "[    0.000309] Plumbum shell: command table loaded", 10, 0
+bl_15 db "[    0.000333] Shell: 128-byte line, 128-byte history", 10, 0
+bl_16 db "[    0.000357] PLB interpreter: expressions, variables", 10, 0
+bl_17 db "[    0.000381] PLB builtins: len asc val rnd abs ticks", 10, 0
+bl_18 db "[    0.000405] PLB builtins: key exists chr str mid", 10, 0
+bl_19 db "[    0.000429] Scheduler: 6 task slots, 20-line slice", 10, 0
+bl_20 db "[    0.000453] Task segments: 0x2000-0x7FFF (4 KB each)", 10, 0
+bl_21 db "[    0.000477] Kernel segment 0x1000, stack 0xFFF0", 10, 0
+bl_22 db "[    0.000501] Buffers: DIRBUF 7K FATBUF 6K SEC 512B", 10, 0
+bl_23 db "[    0.000525] Keyboard: 128-entry scancode table", 10, 0
+bl_24 db "[    0.000549] Video: 80x25 text mode at 0xB8000", 10, 0
+bl_25 db "[    0.000573] GUI loader: .APP images enabled", 10, 0
+bl_26 db "[    0.000597] SDK.INC: system API exported", 10, 0
+bl_27 db "[    0.000621] Files: KERNEL.BIN, *.BIN, *.APP, *.PLB", 10, 0
+bl_28 db "[    0.000645] AUTOEXEC.PLB: startup script queued", 10, 0
+bl_29 db "[    0.000669] Mounting root filesystem...", 10, 0
+bl_30 db "[    0.000693] Starting Plumbum shell...", 10, 0
+
+boot_log_table:
+    dw bl_00, bl_01, bl_02, bl_03, bl_04, bl_05, bl_06, bl_07
+    dw bl_08, bl_09, bl_10, bl_11, bl_12, bl_13, bl_14, bl_15
+    dw bl_16, bl_17, bl_18, bl_19, bl_20, bl_21, bl_22, bl_23
+    dw bl_24, bl_25, bl_26, bl_27, bl_28, bl_29, bl_30
+    dw 0
+
 auto_name   db "AUTOEXECPLB"
 sys_name    db "KERNEL  BIN"
 auto_cmd    db "plb AUTOEXEC.PLB", 0
@@ -5173,7 +5510,7 @@ msg_banner  db 10
             db " \__ \  _/ ' \/ -_) '_/ _` | (_) \__ \", 10
             db " |___/_| |_||_\___|_| \__,_|\___/|___/  v3.0", 10
             db 10
-            db " Plumbum shell + PLB language. Type 'help'.", 10, 10, 0
+            db " Plumbum shell. Type 'help'.", 10, 10, 0
 msg_nomount db "No FAT12 filesystem found on this drive.", 10, 0
 msg_prompt  db ":\> ", 0
 msg_ctrlc   db "^C", 10, 0
@@ -5196,6 +5533,13 @@ msg_fat12   db ": FAT12, total ", 0
 msg_used    db "  used: ", 0
 msg_free    db "  free: ", 0
 msg_biosdrv db ": (BIOS drive 0x", 0
+oemname     db "MSDOS5.0"
+msg_fmt_full_ask db "Format selected drive as FAT12? (y/n): ", 0
+msg_use_fmt  db "Usage: fmt 0x81", 0
+msg_drives  db "BIOS drives:", 13, 10, 0
+msg_drvnum  db "  drive 0x", 0
+msg_hdd     db " (HDD)", 0
+msg_floppy  db " (FDD)", 0
 msg_d_spt   db "  sectors/track : ", 0
 msg_d_heads db "  heads         : ", 0
 msg_d_total db "  total sectors : ", 0
@@ -5271,7 +5615,7 @@ msg_ed_ask  db "Unsaved changes. Save before exit? (y = save, n = discard, other
 msg_help    db "SpheraOS commands:", 10
             db " files : ls cat cp mv rm touch edit hd run", 10
             db " tasks : plb FILE [&]   ps   kill N   killall   fg N", 10
-            db " disk  : df disk drive a|b|c format [-all] fsck [-f] sec N", 10
+            db " disk  : df drives drive 0x81 format [-all] format 0x81 fsck [-f] sec N", 10
             db " system: mem uptime time date ver sysfetch clear echo", 10
             db "         reboot poweroff", 10
             db 10
@@ -5389,6 +5733,22 @@ ed_name     resb 12
 ed_nametxt  resb 16
 tasks       resb 192
 bss_small_end:
+
+; DAP и буфер LBA для int 13h AH=42/43
+dap:        resb 16
+dap_cnt:    equ dap+2      ; dw
+dap_off:    equ dap+4      ; dw
+dap_seg:    equ dap+6      ; dw
+dap_lba:    equ dap+8      ; dq
+io_lba:     resw 1
+part_base:  resw 1
+scan_drv:   resb 1
+scan_cx:    resw 1
+scan_dx:    resw 1
+new_drv:    resb 1
+old_drv:    resb 1
+fmt_drv:    resb 1
+fmt_old:    resb 1
 
 absolute 0xA800
 dirbuf      resb 7168
